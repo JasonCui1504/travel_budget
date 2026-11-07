@@ -1,0 +1,16 @@
+{
+  "id": "/",
+  "name": "Llama + Shrimp Travels",
+  "short_name": "Travels",
+  "description": "Trips, itineraries and the travel budget.",
+  "start_url": "/trips",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#0d1110",
+  "theme_color": "#0d1110",
+  "icons": [
+    { "src": "/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}

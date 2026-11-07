@@ -1,0 +1,104 @@
+@import "tailwindcss";
+
+:root {
+  --canvas: #0d1110;
+  --surface: #141c17;
+  --lift: #1c2820;
+  --line: #243028;
+  --accent: #4a7c59;
+  --accent-dim: #2d4a3e;
+  --prose: #deeade;
+  --subtle: #b0c8b8;
+  --faint: #8aa498;
+
+  --duration-exit: 150ms;
+  --duration-enter: 210ms;
+}
+
+@theme inline {
+  --color-canvas: var(--canvas);
+  --color-surface: var(--surface);
+  --color-lift: var(--lift);
+  --color-line: var(--line);
+  --color-accent: var(--accent);
+  --color-accent-dim: var(--accent-dim);
+  --color-prose: var(--prose);
+  --color-subtle: var(--subtle);
+  --color-faint: var(--faint);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+body {
+  background: var(--canvas);
+  color: var(--prose);
+}
+
+.scrollbar-none {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+.scrollbar-none::-webkit-scrollbar {
+  display: none;
+}
+
+
+/* ─── Leaflet controls ─────────────────────────────────────────── */
+
+.leaflet-bar a,
+.leaflet-bar a:hover {
+  background: var(--surface);
+  border-color: var(--line);
+  color: var(--subtle);
+}
+
+.leaflet-bar a:hover {
+  background: var(--lift);
+  color: var(--prose);
+}
+
+.leaflet-bar {
+  border: 1px solid var(--line);
+  box-shadow: none;
+}
+
+.leaflet-bar a:first-child {
+  border-bottom-color: var(--line);
+}
+
+/* Travel map — dark popups + custom pin */
+.leaflet-div-icon.travel-pin {
+  background: transparent;
+  border: none;
+}
+.travel-pin svg {
+  filter: drop-shadow(0 2px 3px rgba(0, 0, 0, 0.5));
+}
+.leaflet-popup-content-wrapper {
+  background: var(--surface);
+  color: var(--prose);
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.4);
+}
+.leaflet-popup-content {
+  margin: 10px 12px;
+}
+.leaflet-popup-tip {
+  background: var(--surface);
+  border: 1px solid var(--line);
+}
+
+/* Travel planner maps: standard OpenStreetMap tiles turned dark to match the site. */
+.trip-map-tiles {
+  filter: invert(1) hue-rotate(180deg) brightness(0.85) contrast(0.9) saturate(0.6);
+}
+.leaflet-popup-close-button {
+  color: var(--faint) !important;
+}
+.leaflet-popup-close-button:hover {
+  color: var(--prose) !important;
+}
+.leaflet-container {
+  font-family: inherit;
+}

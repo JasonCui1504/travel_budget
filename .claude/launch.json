@@ -1,0 +1,20 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "travel-dev",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": [
+        "run",
+        "dev",
+        "--",
+        "-H",
+        "127.0.0.1",
+        "-p",
+        "3200"
+      ],
+      "port": 3200,
+      "url": "http://127.0.0.1:3200"
+    }
+  ]
+}
