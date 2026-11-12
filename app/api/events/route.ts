@@ -12,5 +12,7 @@ const { POST } = makeCrud("trip_events", [
   { name: "map_link", type: "string" },
   { name: "reservation_link", type: "string" },
   { name: "other_link", type: "string" },
+  { name: "lat", type: "number", nullable: true },
+  { name: "lng", type: "number", nullable: true },
 ]);
 export { POST };

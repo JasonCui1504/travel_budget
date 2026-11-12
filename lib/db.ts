@@ -85,7 +85,9 @@ const SCHEMA = [
     location TEXT NOT NULL DEFAULT '',
     map_link TEXT NOT NULL DEFAULT '',
     reservation_link TEXT NOT NULL DEFAULT '',
-    other_link TEXT NOT NULL DEFAULT ''
+    other_link TEXT NOT NULL DEFAULT '',
+    lat REAL,
+    lng REAL
   )`,
   `CREATE TABLE IF NOT EXISTS trip_days (
     trip_id INTEGER NOT NULL REFERENCES trips(id) ON DELETE CASCADE,
@@ -188,6 +190,9 @@ async function migrate(client: Client): Promise<void> {
       await client.execute(`ALTER TABLE trip_events ADD COLUMN ${col} TEXT NOT NULL DEFAULT ''`);
     }
   }
+  // A pin dropped on the map (or a picked suggestion's position): used instead of looking up the location text.
+  if (!have.has("lat")) await client.execute("ALTER TABLE trip_events ADD COLUMN lat REAL");
+  if (!have.has("lng")) await client.execute("ALTER TABLE trip_events ADD COLUMN lng REAL");
   const expenseCols = await client.execute("PRAGMA table_info(expenses)");
   const haveExp = new Set(expenseCols.rows.map((r) => String(r.name)));
   if (!haveExp.has("flight_from")) await client.execute("ALTER TABLE expenses ADD COLUMN flight_from TEXT NOT NULL DEFAULT ''");

@@ -27,11 +27,18 @@ import {
 } from "./Flights";
 import type { Flight } from "@/lib/queries";
 import EstimatedExpenses from "./EstimatedExpenses";
+import { coordsFrom, coordsLabel, looksLikePin } from "@/lib/coords";
 import TripDoc from "./TripDoc";
 import { AMBER, clock, deadline, loggedDay, RED, shortDate, shortMonth, timeLabel, tzLabel, weatherLook } from "../plan";
 
 // Leaflet needs the browser, so the map loads client-side only.
 const TripMap = dynamic(() => import("../TripMap").then((m) => m.TripMap), {
+  ssr: false,
+  loading: () => <p className="text-sm text-faint">Loading map…</p>,
+});
+
+// The pin picker's map, likewise.
+const PinPicker = dynamic(() => import("./PinPicker"), {
   ssr: false,
   loading: () => <p className="text-sm text-faint">Loading map…</p>,
 });
@@ -238,6 +245,15 @@ type Draft = {
   map_link: string;
   reservation_link: string;
   other_link: string;
+  /** The event's pin; null = find the location text instead. */
+  lat: number | null;
+  lng: number | null;
+  /** The pin came from a picked search result, so typing a different place drops it. */
+  pinAuto?: boolean;
+  /** The pin map is open in the form. */
+  pinOpen?: boolean;
+  /** Feedback while a pasted maps link is read. */
+  pinNote?: string;
   /** Transit only: a row per traveller (unset until the Transit status is picked). */
   flights?: FlightDraft[];
   /** The event had flights when opened, so saving without any clears them. */
@@ -246,6 +262,8 @@ type Draft = {
 
 /** A Google Maps search for a typed place, used when no map link was pasted. */
 const mapsSearch = (place: string) => `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(place)}`;
+/** Google Maps at a pin (opens the app on phones). */
+const mapsAt = (lat: number, lng: number) => `https://www.google.com/maps/search/?api=1&query=${lat},${lng}`;
 
 const emptyDraft = (date: string, start: number, end: number): Draft => ({
   date,
@@ -258,6 +276,8 @@ const emptyDraft = (date: string, start: number, end: number): Draft => ({
   map_link: "",
   reservation_link: "",
   other_link: "",
+  lat: null,
+  lng: null,
 });
 
 const blankDay = (date: string): TripDay => ({
@@ -507,7 +527,8 @@ export default function TripClient({
 
   async function saveEvent() {
     if (!draft) return;
-    const { idea_id, flights, hadFlights, ...body } = { ...draft, trip_id: trip.id };
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    const { idea_id, flights, hadFlights, pinAuto, pinOpen, pinNote, ...body } = { ...draft, trip_id: trip.id };
     const chosen = draft.status === "transit" ? (flights ?? []).filter((f) => f.on) : [];
     let eventId = draft.id;
     const ok = await run(async () => {
@@ -520,6 +541,19 @@ export default function TripClient({
     if (ok) setDraft(null);
     // The event was created but its flights were refused: keep editing that event, not a new one.
     else if (eventId && !draft.id) setDraft({ ...draft, id: eventId });
+  }
+
+  /** A maps link or coordinates typed/pasted into the Location box: becomes the pin (the link also the map link). */
+  async function pinFromText(text: string) {
+    const t = text.trim();
+    const link = /^https?:\/\//i.test(t) ? t : "";
+    setDraft((d) => d && { ...d, location: "", map_link: d.map_link || link, pinNote: link ? "Reading the link…" : "" });
+    const p = await coordsFrom(t);
+    if (!p) {
+      setDraft((d) => d && { ...d, pinOpen: true, pinNote: "Couldn't read a location from that link: drop a pin instead." });
+      return;
+    }
+    setDraft((d) => d && { ...d, lat: p.lat, lng: p.lng, pinAuto: false, pinNote: "", location: d.location || p.name || "" });
   }
 
   /** Saves just the changed fields of one day. */
@@ -603,6 +637,8 @@ export default function TripClient({
       map_link: e.map_link,
       reservation_link: e.reservation_link,
       other_link: e.other_link,
+      lat: e.lat,
+      lng: e.lng,
       flights: e.flights.length ? flightDrafts(people, e.flights, e.date, e.start_hour, e.end_hour) : undefined,
       hadFlights: e.flights.length > 0,
     });
@@ -777,7 +813,9 @@ export default function TripClient({
                     {hasLinks && " · 🔗"}
                   </span>
                   <span>{e.title}</span>
-                  {e.location && <span className="truncate text-[11px] opacity-80">📍 {e.location}</span>}
+                  {(e.location || e.lat != null) && (
+                    <span className="truncate text-[11px] opacity-80">📍 {e.location || "Pinned spot"}</span>
+                  )}
                 </>
               ) : (
                 // One-hour blocks: time and title share a line so the title isn't cut off.
@@ -1481,7 +1519,7 @@ export default function TripClient({
         </div>
         {!trip.hide_map && (
           <>
-            <TripMap tripId={trip.id} dates={dates} />
+            <TripMap tripId={trip.id} dates={dates} tripName={trip.name} />
             <label className="mt-3 flex w-fit items-center gap-2 text-xs text-subtle">
               <input type="checkbox" checked={trip.show_route} disabled={busy} onChange={(e) => run(() => putTrip({ show_route: e.target.checked }))} />
               Show this route on the Trips page map
@@ -1620,14 +1658,14 @@ export default function TripClient({
                   {!viewing.flights.length && ` · ${viewingTimes(viewing)}`}
                   {viewing.status !== "none" && ` · ${STATUS[viewing.status].label}`}
                 </p>
-                {viewing.location && (
+                {(viewing.location || viewing.lat != null) && (
                   <a
-                    href={viewing.map_link || mapsSearch(viewing.location)}
+                    href={viewing.map_link || (viewing.lat != null && viewing.lng != null ? mapsAt(viewing.lat, viewing.lng) : mapsSearch(viewing.location))}
                     target="_blank"
                     rel="noopener noreferrer"
                     className="mt-1 inline-block text-sm text-subtle underline decoration-line underline-offset-2 hover:text-prose [overflow-wrap:anywhere]"
                   >
-                    📍 {viewing.location}
+                    📍 {viewing.location || "Pinned spot"}
                   </a>
                 )}
               </div>
@@ -1713,11 +1751,59 @@ export default function TripClient({
               e.preventDefault();
               saveEvent();
             }}
-            className="flex max-h-[90vh] w-full max-w-md flex-col gap-3 overflow-y-auto rounded-lg border border-line bg-surface p-5"
+            className="flex max-h-[90vh] w-full max-w-md flex-col gap-3 overflow-y-auto rounded-lg border border-line bg-surface p-5 [&>*]:shrink-0"
           >
             <h3 className="text-sm font-medium text-prose">{draft.id ? "Edit event" : "New event"}</h3>
             <input autoFocus required placeholder="What's happening?" value={draft.title} onChange={(e) => setDraft({ ...draft, title: e.target.value })} className={inputCls} />
-            <LocationInput value={draft.location} onChange={(location) => setDraft({ ...draft, location })} tripId={trip.id} />
+            <LocationInput
+              value={draft.location}
+              tripId={trip.id}
+              placeholder="📍 Location — search a place or address, or paste a Google Maps link"
+              onChange={(location) => {
+                if (looksLikePin(location)) {
+                  pinFromText(location);
+                  return;
+                }
+                // Typing a different place drops a pin that came from an earlier search pick.
+                setDraft((d) => d && { ...d, location, ...(d.pinAuto ? { lat: null, lng: null, pinAuto: false } : {}) });
+              }}
+              onPlace={(p) =>
+                p.lat != null && p.lng != null && setDraft((d) => d && { ...d, location: p.value, lat: p.lat!, lng: p.lng!, pinAuto: true })
+              }
+            />
+            <div className="-mt-1 flex flex-col gap-2">
+              <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-faint">
+                {draft.lat != null && draft.lng != null ? (
+                  <>
+                    <span title="The map, weather and directions use this exact spot">
+                      📌 Pinned at{" "}
+                      <a href={mapsAt(draft.lat, draft.lng)} target="_blank" rel="noopener noreferrer" className="text-subtle underline decoration-line underline-offset-2 hover:text-prose">
+                        {coordsLabel({ lat: draft.lat, lng: draft.lng })}
+                      </a>
+                    </span>
+                    <button type="button" className="hover:text-prose" onClick={() => setDraft({ ...draft, pinOpen: !draft.pinOpen })}>
+                      {draft.pinOpen ? "done" : "move pin"}
+                    </button>
+                    <button type="button" className="hover:text-prose" onClick={() => setDraft({ ...draft, lat: null, lng: null, pinAuto: false })}>
+                      remove pin
+                    </button>
+                  </>
+                ) : (
+                  <button type="button" className="hover:text-prose" onClick={() => setDraft({ ...draft, pinOpen: !draft.pinOpen })}>
+                    {draft.pinOpen ? "▾ hide map" : "📌 Can't find it? Drop a pin on the map"}
+                  </button>
+                )}
+                {draft.pinNote && <span className="text-[#e0a63a]">{draft.pinNote}</span>}
+              </div>
+              {draft.pinOpen && (
+                <PinPicker
+                  tripId={trip.id}
+                  value={draft.lat != null && draft.lng != null ? { lat: draft.lat, lng: draft.lng } : null}
+                  near={null}
+                  onChange={(p) => setDraft((d) => d && { ...d, lat: p?.lat ?? null, lng: p?.lng ?? null, pinAuto: false })}
+                />
+              )}
+            </div>
             <div className="flex flex-wrap gap-2">
               <select value={draft.date} onChange={(e) => setDraft({ ...draft, date: e.target.value })} className={inputCls}>
                 {[...new Set([...dates, draft.date])].map((d) => (

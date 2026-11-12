@@ -101,7 +101,7 @@ function useMapData(src: string) {
 }
 
 /** One trip: numbered stops coloured by day, roads between them, and the legs listed underneath. */
-export function TripMap({ tripId, dates }: { tripId: number; dates: string[] }) {
+export function TripMap({ tripId, dates, tripName = "trip" }: { tripId: number; dates: string[]; tripName?: string }) {
   const { data, failed } = useMapData(`/api/trips/${tripId}/map`);
   // Each day its own colour; a leg takes the colour of the day it arrives.
   const dayColor = (d: string) => colorAt(Math.max(0, dates.indexOf(d)));
@@ -129,7 +129,7 @@ export function TripMap({ tripId, dates }: { tripId: number; dates: string[] }) 
 
   return (
     <div className="grid gap-4 lg:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
-      <div className="h-[360px] overflow-hidden rounded-md border border-line sm:h-[420px]">
+      <div className="isolate h-[360px] overflow-hidden rounded-md border border-line sm:h-[420px]">
         <MapContainer center={points[0]} zoom={10} scrollWheelZoom={false} className="h-full w-full" style={{ background: "#0d1110" }}>
           <Tiles />
           <Fit points={points} />
@@ -234,6 +234,7 @@ export function TripMap({ tripId, dates }: { tripId: number; dates: string[] }) 
         <button className="w-fit text-xs text-faint hover:text-prose" onClick={() => setDetails(!details)}>
           {details ? "fewer details" : "show times & addresses"}
         </button>
+        <TakeAlong data={data} dates={dates} day={day} tripName={tripName} />
         <MapNotes data={data} />
       </div>
     </div>
@@ -327,7 +328,7 @@ export function AllTripsMap({ trips, today }: { trips: TripRef[]; today: string 
   const nameOf = (id: number) => trips.find((t) => t.id === id)?.name ?? "";
   return (
     <div className="grid gap-4 lg:grid-cols-[minmax(0,3fr)_minmax(0,1fr)]">
-      <div className="h-[380px] overflow-hidden rounded-md border border-line sm:h-[440px]">
+      <div className="isolate h-[380px] overflow-hidden rounded-md border border-line sm:h-[440px]">
         <MapContainer center={points[0] ?? [data.stops[0].lat, data.stops[0].lng]} zoom={5} scrollWheelZoom={false} className="h-full w-full" style={{ background: "#0d1110" }}>
           <Tiles />
           <Fit points={points} />
@@ -400,6 +401,192 @@ export function AllTripsMap({ trips, today }: { trips: TripRef[]; today: string 
           <MapNotes data={data} />
         </li>
       </ul>
+    </div>
+  );
+}
+
+// ---- Taking a day's route into Google Maps / Apple Maps ----
+
+type Mode = "driving" | "walking" | "transit";
+const MODES: { key: Mode; label: string; apple: string }[] = [
+  { key: "driving", label: "🚗 Drive", apple: "d" },
+  { key: "walking", label: "🚶 Walk", apple: "w" },
+  { key: "transit", label: "🚆 Transit", apple: "r" },
+];
+/** Google Maps takes at most 9 stops between the start and the end of one link. */
+const GOOGLE_STOPS = 11;
+
+const ll = (s: Stop) => `${s.lat.toFixed(6)},${s.lng.toFixed(6)}`;
+
+/** Google Maps directions through these stops in order (opens the app on phones). */
+function googleRoute(stops: Stop[], mode: Mode) {
+  const q = new URLSearchParams({ api: "1", origin: ll(stops[0]), destination: ll(stops[stops.length - 1]), travelmode: mode });
+  if (stops.length > 2) q.set("waypoints", stops.slice(1, -1).map(ll).join("|"));
+  return `https://www.google.com/maps/dir/?${q}`;
+}
+/** Directions from wherever you are to one stop. */
+const googleTo = (s: Stop, mode: Mode) => `https://www.google.com/maps/dir/?api=1&destination=${ll(s)}&travelmode=${mode}`;
+const appleTo = (s: Stop, mode: Mode) =>
+  `https://maps.apple.com/?daddr=${ll(s)}&dirflg=${MODES.find((m) => m.key === mode)!.apple}&q=${encodeURIComponent(s.titles.join(", "))}`;
+
+/** Stops in runs that can be routed by road: a flight between two stops starts a new run. */
+function runs(stops: { s: Stop; i: number }[], legs: Leg[]) {
+  const out: Stop[][] = [];
+  for (const { s, i } of stops) {
+    const leg = i > 0 ? legs[i - 1] : undefined;
+    const last = out[out.length - 1];
+    if (!last || leg?.mode === "flight" || !stops.some((x) => x.i === i - 1)) out.push([s]);
+    else last.push(s);
+  }
+  // Long runs are split across links, each starting where the last ended.
+  return out.flatMap((run) => {
+    if (run.length <= GOOGLE_STOPS) return [run];
+    const parts: Stop[][] = [];
+    for (let k = 0; k < run.length - 1; k += GOOGLE_STOPS - 1) parts.push(run.slice(k, k + GOOGLE_STOPS));
+    return parts;
+  });
+}
+
+const xml = (t: string) => t.replace(/[<>&'"]/g, (c) => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;", "'": "&apos;", '"': "&quot;" })[c]!);
+
+/** A KML file of the stops (numbered pins) and the roads between them: Google My Maps, Google Earth and most map apps open it. */
+function kml(name: string, stops: { s: Stop; i: number }[], legs: Leg[]) {
+  const pins = stops.map(
+    ({ s, i }) => `  <Placemark>
+    <name>${i + 1}. ${xml(s.titles.join(", "))}</name>
+    <description>${xml(`${when(s)} · ${s.location}`)}</description>
+    <Point><coordinates>${s.lng},${s.lat},0</coordinates></Point>
+  </Placemark>`
+  );
+  const lines = legs.map(
+    (l) => `  <Placemark>
+    <name>${xml(`${l.from} → ${l.to}`)}</name>
+    <styleUrl>#road</styleUrl>
+    <LineString><tessellate>1</tessellate><coordinates>${l.path.map(([lat, lng]) => `${lng},${lat},0`).join(" ")}</coordinates></LineString>
+  </Placemark>`
+  );
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<kml xmlns="http://www.opengis.net/kml/2.2">
+<Document>
+  <name>${xml(name)}</name>
+  <Style id="road"><LineStyle><color>ffe58739</color><width>4</width></LineStyle></Style>
+${[...pins, ...lines].join("\n")}
+</Document>
+</kml>
+`;
+}
+
+function download(filename: string, text: string, type: string) {
+  const url = URL.createObjectURL(new Blob([text], { type }));
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+const fileSafe = (t: string) => t.replace(/[^\w\- ]+/g, "").trim().replace(/\s+/g, "-").toLowerCase() || "trip";
+
+/**
+ * The picked day (or the whole trip) as something to use on the go: the
+ * route in Google Maps, directions to each stop in Google or Apple Maps, a
+ * KML file for Google My Maps, or the list as text.
+ */
+function TakeAlong({ data, dates, day, tripName }: { data: MapData; dates: string[]; day: string | null; tripName: string }) {
+  const [mode, setMode] = useState<Mode>("driving");
+  const [copied, setCopied] = useState(false);
+  const stops = data.stops.map((s, i) => ({ s, i })).filter(({ s }) => !day || onDay(s, day));
+  if (!stops.length) return null;
+  const legs = data.legs.filter((_, k) => stops.some((x) => x.i === k + 1) && stops.some((x) => x.i === k));
+  const label = day ? `Day ${dates.indexOf(day) + 1} · ${shortDate(day, true)}` : "Whole trip";
+  const routes = day ? runs(stops, data.legs).filter((r) => r.length > 1) : [];
+  const text = stops
+    .map(({ s, i }) => `${i + 1}. ${s.titles.join(", ")} — ${when(s)}\n   ${s.location} (${ll(s)})`)
+    .join("\n");
+
+  return (
+    <div className="mt-2 flex flex-col gap-2 rounded-md border border-line p-3">
+      <div className="flex flex-wrap items-baseline justify-between gap-2">
+        <h3 className="text-xs font-medium uppercase tracking-wide text-subtle">Take it with you · {label}</h3>
+        <div className="flex rounded border border-line p-0.5 text-[11px]">
+          {MODES.map((m) => (
+            <button
+              key={m.key}
+              onClick={() => setMode(m.key)}
+              className={`rounded px-1.5 py-0.5 transition-colors ${mode === m.key ? "bg-lift text-prose" : "text-faint hover:text-subtle"}`}
+            >
+              {m.label}
+            </button>
+          ))}
+        </div>
+      </div>
+      {!day && <p className="text-xs text-faint">Pick a day above to open its route in Google Maps, step by step.</p>}
+      {day && routes.length > 0 && mode !== "transit" && (
+        <div className="flex flex-wrap gap-1.5">
+          {routes.map((r, k) => (
+            <a
+              key={k}
+              href={googleRoute(r, mode)}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="rounded bg-accent-dim px-2.5 py-1 text-xs text-prose transition-colors hover:brightness-110"
+            >
+              Open {routes.length > 1 ? `part ${k + 1} (${r.length} stops)` : `the day's ${r.length} stops`} in Google Maps ↗
+            </a>
+          ))}
+        </div>
+      )}
+      {day && mode === "transit" && routes.length > 0 && (
+        <p className="text-xs text-faint">Transit directions go one stop at a time: use the links below as you go.</p>
+      )}
+      {day && (
+        <ol className="flex flex-col gap-1 text-xs">
+          {stops.map(({ s, i }) => (
+            <li key={i} className="flex items-baseline gap-2">
+              <span className="w-5 shrink-0 text-right text-faint">{i + 1}.</span>
+              <span className="min-w-0 flex-1 truncate text-subtle" title={s.location}>
+                {s.titles.join(", ")}
+              </span>
+              <span className="shrink-0 text-faint">directions:</span>
+              <a href={googleTo(s, mode)} target="_blank" rel="noopener noreferrer" className="shrink-0 text-subtle underline decoration-line underline-offset-2 hover:text-prose">
+                Google
+              </a>
+              <a href={appleTo(s, mode)} target="_blank" rel="noopener noreferrer" className="shrink-0 text-subtle underline decoration-line underline-offset-2 hover:text-prose">
+                Apple
+              </a>
+            </li>
+          ))}
+        </ol>
+      )}
+      <div className="flex flex-wrap gap-x-3 gap-y-1 text-xs">
+        <button
+          className="text-faint hover:text-prose"
+          title="Import into Google My Maps (mymaps.google.com → Create a new map → Import), then find it in the Google Maps app under Saved → Maps"
+          onClick={() =>
+            download(`${fileSafe(tripName)}${day ? `-day-${dates.indexOf(day) + 1}` : ""}.kml`, kml(`${tripName} · ${label}`, stops, legs), "application/vnd.google-earth.kml+xml")
+          }
+        >
+          ⬇ KML file (Google My Maps)
+        </button>
+        <button
+          className="text-faint hover:text-prose"
+          onClick={async () => {
+            try {
+              await navigator.clipboard.writeText(`${tripName} · ${label}\n${text}`);
+              setCopied(true);
+              setTimeout(() => setCopied(false), 1500);
+            } catch {
+              // Clipboard blocked: nothing to do.
+            }
+          }}
+        >
+          {copied ? "✓ copied" : "⧉ copy list"}
+        </button>
+      </div>
+      <p className="text-[11px] leading-snug text-faint">
+        Google Maps links open the app on your phone with every stop in order. Apple Maps and Google links per stop give directions from
+        where you are. The KML file brings the pins and roads into Google My Maps (then Google Maps → Saved → Maps).
+      </p>
     </div>
   );
 }

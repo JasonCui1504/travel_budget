@@ -15,6 +15,7 @@ export default function LocationInput({
   onChange,
   tripId,
   onPick,
+  onPlace,
   placeholder = "📍 Location — search a place or address (optional)",
   className = `${inputCls} w-full`,
   label = "Location",
@@ -24,6 +25,8 @@ export default function LocationInput({
   tripId: number;
   /** Called with a picked suggestion (after onChange). */
   onPick?: (v: string) => void;
+  /** Called with a picked suggestion's position too. */
+  onPlace?: (p: { value: string; lat?: number; lng?: number }) => void;
   placeholder?: string;
   className?: string;
   label?: string;
@@ -67,6 +70,7 @@ export default function LocationInput({
     picked.current = p.value;
     onChange(p.value);
     onPick?.(p.value);
+    onPlace?.(p);
     setOpen(false);
   }
 

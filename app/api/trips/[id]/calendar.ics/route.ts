@@ -122,6 +122,8 @@ export async function GET(request: NextRequest, ctx: { params: Promise<{ id: str
       `DTEND${at(e.date, e.end_hour)}`,
       `SUMMARY:${esc(e.title)}`,
       ...(e.location ? [`LOCATION:${esc(e.location)}`] : []),
+      // A dropped pin: calendar apps can show the exact spot.
+      ...(e.lat != null && e.lng != null ? [`GEO:${e.lat};${e.lng}`] : []),
       ...(details.length ? [`DESCRIPTION:${esc(details.join("\n"))}`] : []),
       "END:VEVENT"
     );

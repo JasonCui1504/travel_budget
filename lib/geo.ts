@@ -1,4 +1,5 @@
 import type { Client } from "@libsql/client";
+import { coordsLabel, parseCoords } from "./coords";
 
 // Place lookups and driving routes for the trip maps and weather, from free
 // OpenStreetMap services (no API key): Nominatim for places, the OSRM demo
@@ -35,7 +36,16 @@ export type Leg = {
 };
 export type MapData = { stops: Stop[]; legs: Leg[]; missing: string[]; pending: number };
 
-type EventRow = { trip_id: number; date: string; start_hour: number; title: string; location: string; hotel?: boolean };
+type EventRow = {
+  trip_id: number;
+  date: string;
+  start_hour: number;
+  title: string;
+  location: string;
+  hotel?: boolean;
+  /** A dropped pin (or coordinates in the event's map link): used as is, no lookup. */
+  pin?: Point | null;
+};
 
 const norm = (q: string) => q.trim().replace(/\s+/g, " ").toLowerCase();
 const nextDay = (d: string) => new Date(Date.parse(d) + 86_400_000).toISOString().slice(0, 10);
@@ -161,8 +171,8 @@ export async function buildMap(
   const ids = tripIds.map(() => "?").join(",");
   const [rs, stays] = await Promise.all([
     db.execute({
-      sql: `SELECT trip_id, date, start_hour, title, location FROM trip_events
-            WHERE location != '' AND trip_id IN (${ids})
+      sql: `SELECT trip_id, date, start_hour, title, location, lat, lng, map_link FROM trip_events
+            WHERE (location != '' OR lat IS NOT NULL) AND trip_id IN (${ids})
             ORDER BY trip_id, date, start_hour, id`,
       args: tripIds,
     }),
@@ -195,7 +205,18 @@ export async function buildMap(
   }
   const byDay = new Map<string, EventRow[]>();
   for (const r of rs.rows) {
-    const e = { trip_id: Number(r.trip_id), date: String(r.date), start_hour: Number(r.start_hour), title: String(r.title), location: String(r.location) };
+    const pin =
+      r.lat != null && r.lng != null ? { lat: Number(r.lat), lng: Number(r.lng) } : parseCoords(String(r.map_link ?? ""));
+    const location = String(r.location).trim();
+    const e: EventRow = {
+      trip_id: Number(r.trip_id),
+      date: String(r.date),
+      start_hour: Number(r.start_hour),
+      title: String(r.title),
+      location: location || (pin ? coordsLabel(pin) : ""),
+      pin,
+    };
+    if (!e.location) continue;
     dayOf(e.trip_id).add(e.date);
     const k = `${e.trip_id}|${e.date}`;
     byDay.set(k, [...(byDay.get(k) ?? []), e]);
@@ -211,13 +232,14 @@ export async function buildMap(
       events.push(...stay(prevNight, 0), ...(byDay.get(`${trip}|${date}`) ?? []), ...stay(date, 24));
     }
   }
-  const found = await places(db, events.map((e) => e.location), budget.places);
+  // Pinned events need no lookup.
+  const found = await places(db, events.filter((e) => !e.pin).map((e) => e.location), budget.places);
   let pending = found.pending;
   const missing = new Set<string>();
 
   const stops: Stop[] = [];
   for (const e of events) {
-    const p = found.get(e.location);
+    const p = e.pin ?? found.get(e.location);
     if (p === null) missing.add(e.location);
     if (!p) continue;
     const prev = stops[stops.length - 1];

@@ -63,6 +63,9 @@ export type TripEvent = {
   map_link: string;
   reservation_link: string;
   other_link: string;
+  /** Where the event's pin is, when one was dropped or a suggestion picked; else the location text is looked up. */
+  lat: number | null;
+  lng: number | null;
   /** Transit events: each traveller's flight. */
   flights: Flight[];
 };
@@ -395,6 +398,8 @@ export async function getTrip(id: number): Promise<{
       map_link: str(r.map_link),
       reservation_link: str(r.reservation_link),
       other_link: str(r.other_link),
+      lat: r.lat == null ? null : num(r.lat),
+      lng: r.lng == null ? null : num(r.lng),
       flights: flightsByEvent.get(num(r.id)) ?? [],
     })),
     days: days.rows.map((r) => ({
