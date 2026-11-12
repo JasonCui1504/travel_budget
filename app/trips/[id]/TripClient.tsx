@@ -63,14 +63,53 @@ function hourLabel(h: number) {
   return `${hh % 12 === 0 ? 12 : hh % 12} ${hh < 12 ? "AM" : "PM"}`;
 }
 
-/** 1.5 → "1h 30m", 0.5 → "30m", 2 → "2h". */
+/** 1.5 → "1h 30m", 0.25 → "15m", 2 → "2h". */
 function lengthLabel(h: number) {
   const min = Math.round(h * 60);
   return [Math.floor(min / 60) && `${Math.floor(min / 60)}h`, min % 60 && `${min % 60}m`].filter(Boolean).join(" ");
 }
 
-/** The calendar works in half hours: 0, 0.5, … 23.5. */
-const SLOTS = Array.from({ length: 48 }, (_, i) => i / 2);
+/** The calendar works in quarter hours: 0, 0.25, … 23.75. */
+const STEP = 0.25;
+const SLOTS = Array.from({ length: 24 / STEP }, (_, i) => i * STEP);
+/** An hour (9.75) as "09:45". */
+const hhmm = (h: number) => {
+  const min = Math.round(h * 60);
+  return `${String(Math.floor(min / 60)).padStart(2, "0")}:${String(min % 60).padStart(2, "0")}`;
+};
+
+/** How tall the calendar's hours are drawn, ×1 to ×4; kept per device. */
+const ZOOMS = [1, 1.5, 2, 3, 4];
+const ZOOM_KEY = "travel-calendar-zoom";
+function useZoom(): [number, (v: number) => void] {
+  const stored = useSyncExternalStore(
+    (cb) => {
+      window.addEventListener("storage", cb);
+      window.addEventListener(ZOOM_KEY, cb);
+      return () => {
+        window.removeEventListener("storage", cb);
+        window.removeEventListener(ZOOM_KEY, cb);
+      };
+    },
+    () => {
+      try {
+        return Number(localStorage.getItem(ZOOM_KEY)) || 1;
+      } catch {
+        return 1;
+      }
+    },
+    () => 1
+  );
+  const set = (v: number) => {
+    try {
+      localStorage.setItem(ZOOM_KEY, String(v));
+    } catch {
+      // Private mode: the zoom lasts for this page only.
+    }
+    window.dispatchEvent(new Event(ZOOM_KEY));
+  };
+  return [ZOOMS.includes(stored) ? stored : 1, set];
+}
 
 const addDays = (d: string, n: number) => new Date(Date.parse(d) + n * 86_400_000).toISOString().slice(0, 10);
 
@@ -310,9 +349,10 @@ export default function TripClient({
     /** False when no event has a location the forecast can use. */
     located: boolean;
   } | null>(null);
-  // Drag to pick a time span (new event), or drag an event's bottom edge (resize).
+  // Drag to pick a time span (new event), or drag an event's top or bottom edge (resize).
   const [drag, setDrag] = useState<{ date: string; anchor: number; cur: number } | null>(null);
-  const [resize, setResize] = useState<{ id: number; start: number; end: number } | null>(null);
+  const [resize, setResize] = useState<{ id: number; edge: "start" | "end"; start: number; end: number } | null>(null);
+  const [zoom, setZoom] = useZoom();
   const colRefs = useRef(new Map<string, HTMLDivElement>());
   const calendarRef = useRef<HTMLDivElement>(null);
   // On touch, a drag or resize starts only after the finger is held still (so scrolling in Edit
@@ -398,9 +438,8 @@ export default function TripClient({
           : deviceTz || tripTz;
   const converting = !!tripTz && !!viewTz && viewTz !== tripTz;
   const eventInstant = (date: string, hour: number) => {
-    const min = Math.round(Math.min(hour, 23.5) * 60);
-    const local = `${date}T${String(Math.floor(min / 60)).padStart(2, "0")}:${String(min % 60).padStart(2, "0")}`;
-    return instantOf(local, tripTz) + (hour >= 24 ? 1_800_000 : 0); // 24 = midnight, half an hour past 23:30
+    // 24 = midnight at the end of the day: an hour past 23:00.
+    return instantOf(`${date}T${hhmm(Math.min(hour, 23))}`, tripTz) + (hour >= 24 ? 3_600_000 : 0);
   };
 
   // Each flight is its own block at its real times; other events are converted
@@ -445,7 +484,8 @@ export default function TripClient({
   const from = editing ? 0 : converting ? autoFrom : (trip.view_start_hour ?? autoFrom);
   const to = editing ? 24 : Math.max(from + 1, converting ? autoTo : (trip.view_end_hour ?? autoTo));
   const hours = Array.from({ length: to - from }, (_, i) => from + i);
-  const row = phone && !editing ? 48 : 36;
+  // Pixels per hour.
+  const row = (phone && !editing ? 48 : 36) * zoom;
 
   async function run(fn: () => Promise<unknown>) {
     setBusy(true);
@@ -525,12 +565,27 @@ export default function TripClient({
     );
   }
 
-  /** The hour under the pointer in a day column, clamped to the grid. */
+  /** The quarter hour under the pointer in a day column, clamped to the grid. */
   function hourAt(date: string, clientY: number) {
     const el = colRefs.current.get(date);
     if (!el) return from;
     const y = clientY - el.getBoundingClientRect().top;
-    return Math.max(from, Math.min(to - 0.5, from + Math.floor((y / row) * 2) / 2));
+    return Math.max(from, Math.min(to - STEP, from + Math.floor(y / row / STEP) * STEP));
+  }
+
+  /** Start dragging an event's top or bottom edge. */
+  function startResize(ev: React.PointerEvent, date: string, r: NonNullable<typeof resize>) {
+    ev.stopPropagation();
+    const col = colRefs.current.get(date);
+    if (col) pressThen(ev, col, () => setResize(r));
+  }
+
+  /** The quarter-hour line nearest the pointer (for an edge being dragged), clamped to the grid. */
+  function edgeAt(date: string, clientY: number) {
+    const el = colRefs.current.get(date);
+    if (!el) return from;
+    const y = clientY - el.getBoundingClientRect().top;
+    return Math.max(from, Math.min(to, from + Math.round(y / row / STEP) * STEP));
   }
 
   function openEditor(e: TripEvent) {
@@ -569,7 +624,7 @@ export default function TripClient({
   /** One day's column of hours with its events; shared by the grid and the phone day view. */
   function dayColumn(d: string) {
     const placed = layout(inTrip.filter((e) => e.date === d));
-    const sel = drag && drag.date === d ? { a: Math.min(drag.anchor, drag.cur), b: Math.max(drag.anchor, drag.cur) + 0.5 } : null;
+    const sel = drag && drag.date === d ? { a: Math.min(drag.anchor, drag.cur), b: Math.max(drag.anchor, drag.cur) + STEP } : null;
     return (
       <div
         ref={(el) => {
@@ -598,9 +653,9 @@ export default function TripClient({
           let h = hourAt(d, ev.clientY);
           // Dropped on a calendar shown in another zone: store it in the trip's zone.
           if (converting) {
-            const c = wallClock(instantOf(`${d}T${String(h).padStart(2, "0")}:00`, viewTz), tripTz);
+            const c = wallClock(instantOf(`${d}T${hhmm(h)}`, viewTz), tripTz);
             day = c.date;
-            h = c.hour + (c.minute >= 30 ? 0.5 : 0);
+            h = c.hour + Math.floor(c.minute / 15) * STEP;
           }
           setDraft({ ...emptyDraft(day, h, Math.min(24, h + 1)), title: idea.text, idea_id: idea.id });
         }}
@@ -615,9 +670,12 @@ export default function TripClient({
           } else if (drag && drag.date === d) {
             const h = hourAt(d, ev.clientY);
             if (h !== drag.cur) setDrag({ ...drag, cur: h });
-          } else if (resize) {
-            const end = Math.max(resize.start + 0.5, Math.min(24, hourAt(d, ev.clientY) + 0.5));
+          } else if (resize?.edge === "end") {
+            const end = Math.max(resize.start + STEP, Math.min(24, edgeAt(d, ev.clientY)));
             if (end !== resize.end) setResize({ ...resize, end });
+          } else if (resize) {
+            const start = Math.min(resize.end - STEP, Math.max(0, edgeAt(d, ev.clientY)));
+            if (start !== resize.start) setResize({ ...resize, start });
           }
         }}
         // The browser took the touch over (e.g. it began scrolling): drop the half-made gesture.
@@ -632,20 +690,30 @@ export default function TripClient({
           gesture.current = false;
           if (drag && drag.date === d) {
             const a = Math.min(drag.anchor, drag.cur);
-            const b = Math.max(drag.anchor, drag.cur) + 0.5;
+            const b = Math.max(drag.anchor, drag.cur) + STEP;
             setDrag(null);
             setDraft(emptyDraft(d, a, b));
           } else if (resize) {
             const r = resize;
             setResize(null);
             const e = events.find((x) => x.id === r.id);
-            if (e && e.end_hour !== r.end) run(() => api(`events/${r.id}`, "PUT", { ...e, trip_id: trip.id, end_hour: r.end }));
+            if (e && (e.start_hour !== r.start || e.end_hour !== r.end))
+              run(() => api(`events/${r.id}`, "PUT", { ...e, trip_id: trip.id, start_hour: r.start, end_hour: r.end }));
           }
         }}
       >
         {hours.map((h) => (
           <div key={h} className="border-t border-line/60" style={{ height: row }}>
-            <div className="h-1/2 border-b border-dashed border-line/40" />
+            {row >= 64 ? (
+              // Zoomed in far enough to show quarter-hour lines too.
+              <>
+                <div className="h-1/4 border-b border-dotted border-line/30" />
+                <div className="h-1/4 border-b border-dashed border-line/40" />
+                <div className="h-1/4 border-b border-dotted border-line/30" />
+              </>
+            ) : (
+              <div className="h-1/2 border-b border-dashed border-line/40" />
+            )}
           </div>
         ))}
         {dropAt?.date === d && (
@@ -665,11 +733,13 @@ export default function TripClient({
           </div>
         )}
         {placed.map(({ e, lane, lanes }) => {
-          const end = resize?.id === e.id ? resize.end : e.end_hour;
-          if (end <= from || e.start_hour >= to) return null;
+          const sized = resize && resize.id === e.id && !e.seg ? resize : null;
+          const start = sized ? sized.start : e.start_hour;
+          const end = sized ? sized.end : e.end_hour;
+          if (end <= from || start >= to) return null;
           const s = STATUS[e.status] ?? STATUS.none;
-          const top = (Math.max(e.start_hour, from) - from) * row;
-          const height = (Math.min(end, to) - Math.max(e.start_hour, from)) * row;
+          const top = (Math.max(start, from) - from) * row;
+          const height = (Math.min(end, to) - Math.max(start, from)) * row;
           const hasLinks = LINKS.some((l) => e[l.key]);
           const seg = e.seg;
           return (
@@ -703,7 +773,7 @@ export default function TripClient({
               ) : height > row ? (
                 <>
                   <span className="text-[11px] opacity-70">
-                    {timeLabel(e.start_hour)}–{timeLabel(end)}
+                    {timeLabel(start)}–{timeLabel(end)}
                     {hasLinks && " · 🔗"}
                   </span>
                   <span>{e.title}</span>
@@ -712,21 +782,26 @@ export default function TripClient({
               ) : (
                 // One-hour blocks: time and title share a line so the title isn't cut off.
                 <span className="truncate">
-                  <span className="opacity-70">{timeLabel(e.start_hour)}{hasLinks && " 🔗"} · </span>
+                  <span className="opacity-70">{timeLabel(start)}{hasLinks && " 🔗"} · </span>
                   {e.title}
                 </span>
               )}
               {editing && !seg && (
-                <span
-                  aria-label="Drag to resize"
-                  onPointerDown={(ev) => {
-                    ev.stopPropagation();
-                    const col = colRefs.current.get(d);
-                    if (col) pressThen(ev, col, () => setResize({ id: e.id, start: e.start_hour, end: e.end_hour }));
-                  }}
-                  onClick={(ev) => ev.stopPropagation()}
-                  className="absolute inset-x-0 bottom-0 h-2 cursor-ns-resize hover:bg-black/15"
-                />
+                // Grab the top edge to change when it starts, the bottom edge to change when it ends.
+                <>
+                  <span
+                    aria-label="Drag to change the start"
+                    onPointerDown={(ev) => startResize(ev, d, { id: e.id, edge: "start", start: e.start_hour, end: e.end_hour })}
+                    onClick={(ev) => ev.stopPropagation()}
+                    className={`absolute inset-x-0 top-0 cursor-ns-resize hover:bg-black/15 ${height < 24 ? "h-1" : "h-2"}`}
+                  />
+                  <span
+                    aria-label="Drag to change the end"
+                    onPointerDown={(ev) => startResize(ev, d, { id: e.id, edge: "end", start: e.start_hour, end: e.end_hour })}
+                    onClick={(ev) => ev.stopPropagation()}
+                    className={`absolute inset-x-0 bottom-0 cursor-ns-resize hover:bg-black/15 ${height < 24 ? "h-1" : "h-2"}`}
+                  />
+                </>
               )}
             </div>
           );
@@ -1175,7 +1250,7 @@ export default function TripClient({
           </button>
           {editing && (
             <p className="border-t border-line px-3 pb-1 pt-2 text-[11px] leading-snug text-faint">
-              Tip: drag down a day to add an event, drag an event&apos;s bottom edge to resize, click one to edit.
+              Tip: drag down a day to add an event, drag an event&apos;s top or bottom edge to change its times, click one to edit.
             </p>
           )}
         </div>
@@ -1235,6 +1310,33 @@ export default function TripClient({
           </div>
         )}
         <div className="ml-auto flex items-center gap-2">
+          <div className="flex items-center rounded border border-line text-sm leading-none text-subtle" role="group" aria-label="Calendar zoom">
+            <button
+              onClick={() => setZoom(ZOOMS[Math.max(0, ZOOMS.indexOf(zoom) - 1)])}
+              disabled={zoom === ZOOMS[0]}
+              aria-label="Zoom out"
+              title="Zoom out"
+              className="px-2.5 py-1.5 transition-colors hover:text-prose disabled:opacity-30"
+            >
+              −
+            </button>
+            <button
+              onClick={() => setZoom(1)}
+              title="Reset zoom"
+              className="min-w-10 px-1 py-1.5 text-center text-xs tabular-nums transition-colors hover:text-prose"
+            >
+              {zoom}×
+            </button>
+            <button
+              onClick={() => setZoom(ZOOMS[Math.min(ZOOMS.length - 1, ZOOMS.indexOf(zoom) + 1)])}
+              disabled={zoom === ZOOMS[ZOOMS.length - 1]}
+              aria-label="Zoom in"
+              title="Zoom in"
+              className="px-2.5 py-1.5 transition-colors hover:text-prose disabled:opacity-30"
+            >
+              +
+            </button>
+          </div>
           <div className="flex rounded border border-line p-0.5">
             {(["view", "edit"] as const).map((m) => (
               <button
@@ -1628,7 +1730,7 @@ export default function TripClient({
                 value={draft.start_hour}
                 onChange={(e) => {
                   const s = Number(e.target.value);
-                  setDraft({ ...draft, start_hour: s, end_hour: Math.max(draft.end_hour, s + 0.5) });
+                  setDraft({ ...draft, start_hour: s, end_hour: Math.max(draft.end_hour, s + STEP) });
                 }}
                 className={inputCls}
               >
@@ -1640,7 +1742,7 @@ export default function TripClient({
               </select>
               <span className="self-center text-faint">to</span>
               <select value={draft.end_hour} onChange={(e) => setDraft({ ...draft, end_hour: Number(e.target.value) })} className={inputCls}>
-                {SLOTS.map((h) => h + 0.5)
+                {SLOTS.map((h) => h + STEP)
                   .filter((h) => h > draft.start_hour)
                   .map((h) => (
                     <option key={h} value={h}>
@@ -1651,7 +1753,7 @@ export default function TripClient({
             </div>
             <div className="flex flex-wrap items-center gap-1.5 text-xs text-faint">
               Takes
-              {[0.5, 1, 1.5, 2, 3, 4, 6, 8].map((n) => {
+              {[0.25, 0.5, 0.75, 1, 1.5, 2, 3, 4, 6, 8].map((n) => {
                 const on = draft.end_hour - draft.start_hour === n;
                 return (
                   <button

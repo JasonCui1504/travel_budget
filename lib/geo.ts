@@ -270,16 +270,41 @@ export async function tripCenter(db: Client, tripId: number): Promise<Point | nu
   return { lat: pts.reduce((s, p) => s + p.lat, 0) / pts.length, lng: pts.reduce((s, p) => s + p.lng, 0) / pts.length };
 }
 
-export type PlaceSuggestion = Point & { value: string; detail: string };
+export type PlaceSuggestion = Point & {
+  /** What goes in the Location box (and is looked up for the map): name, street and town. */
+  value: string;
+  /** The place's own name, or its street address when it has none. */
+  name: string;
+  /** What sort of place it is: "Cafe", "Museum", "Address", "City"… */
+  kind: string;
+  /** Its full postal address, so look-alike results can be told apart. */
+  address: string;
+  /** Same as `address` (older clients read this). */
+  detail: string;
+};
+
+/** OpenStreetMap tag values that say nothing useful about a place. */
+const VAGUE_KIND = new Set(["yes", "unclassified", "residential", "service", "primary", "secondary", "tertiary", "building"]);
+
+/** Photon's osm_key/osm_value/type → a short label: "fast_food" → "Fast food", a house number → "Address". */
+function placeKind(p: Record<string, string | undefined>): string {
+  if (p.type === "house" && !p.name) return "Address";
+  if (p.type === "street" || p.osm_key === "highway") return "Street";
+  const v = p.osm_value ?? "";
+  if (!v || VAGUE_KIND.has(v)) return p.type && p.type !== "house" ? cap(p.type) : "";
+  return cap(v.replace(/_/g, " "));
+}
+const cap = (x: string) => x.charAt(0).toUpperCase() + x.slice(1);
 
 /**
  * Search-as-you-type suggestions from Photon (komoot's free OpenStreetMap
- * search, built for autocomplete). Each suggestion's coordinates go into the
- * place cache under its text, so picking one never needs a second lookup.
+ * search, built for autocomplete; it takes street addresses as well as place
+ * names). Each suggestion's coordinates go into the place cache under its
+ * text, so picking one never needs a second lookup.
  */
 export async function suggestPlaces(db: Client, q: string, near: Point | null): Promise<PlaceSuggestion[]> {
   const bias = near ? `&lat=${near.lat.toFixed(3)}&lon=${near.lng.toFixed(3)}` : "";
-  const res = await fetch(`https://photon.komoot.io/api/?q=${encodeURIComponent(q)}&limit=6&lang=en${bias}`, {
+  const res = await fetch(`https://photon.komoot.io/api/?q=${encodeURIComponent(q)}&limit=8&lang=en${bias}`, {
     headers: { "User-Agent": UA },
     next: { revalidate: 86400 },
     signal: AbortSignal.timeout(6000),
@@ -288,28 +313,52 @@ export async function suggestPlaces(db: Client, q: string, near: Point | null): 
   const data = (await res.json()) as {
     features: { geometry: { coordinates: [number, number] }; properties: Record<string, string | undefined> }[];
   };
-  const seen = new Set<string>();
-  const out: PlaceSuggestion[] = [];
-  for (const f of data.features) {
+  const found = data.features.flatMap((f) => {
     const p = f.properties;
     const street = [p.housenumber, p.street].filter(Boolean).join(" ");
     const name = p.name || street;
-    if (!name) continue;
+    if (!name) return [];
     const town = p.city || p.town || p.village || p.district || p.county;
+    // The neighbourhood, when it isn't already the town: tells apart two branches on unnamed streets.
+    const area = [p.locality, p.district].find((x) => x && x !== town && x !== name);
     const region = p.countrycode === "US" || p.countrycode === "CA" ? p.state : undefined;
-    const value = [name, name !== street ? street : "", town !== name ? town : "", region || (p.countrycode !== "US" ? p.country : "")]
+    const value = [
+      name,
+      name !== street ? street || area : "",
+      town !== name ? town : "",
+      region || (p.countrycode !== "US" ? p.country : ""),
+    ]
       .filter(Boolean)
       .join(", ");
-    if (seen.has(value)) continue;
-    seen.add(value);
+    const address = [
+      name !== street ? street : "",
+      area,
+      [p.postcode, town !== name ? town : ""].filter(Boolean).join(" "),
+      p.state !== town ? p.state : "",
+      p.country,
+    ]
+      .filter(Boolean)
+      .join(", ");
     const [lng, lat] = f.geometry.coordinates;
-    out.push({ value, detail: [town, p.state, p.country].filter((x, i, a) => x && a.indexOf(x) === i).join(", "), lat, lng });
+    return [{ value, name, kind: placeKind(p), address, detail: address, lat, lng, postcode: p.postcode }];
+  });
+  // Two results that would read the same in the Location box (two branches of a chain in one town):
+  // add the postcode so the saved text still finds the one picked.
+  const count = new Map<string, number>();
+  for (const s of found) count.set(s.value, (count.get(s.value) ?? 0) + 1);
+  const seen = new Set<string>();
+  const out: PlaceSuggestion[] = [];
+  for (const { postcode, ...s } of found) {
+    if ((count.get(s.value) ?? 0) > 1 && postcode) s.value = `${s.value} ${postcode}`;
+    if (seen.has(s.value)) continue;
+    seen.add(s.value);
+    out.push(s);
   }
   if (out.length) {
     await db.batch(
       out.map((s) => ({
         sql: "INSERT OR REPLACE INTO geocode_cache (query, found, lat, lng, label) VALUES (?, 1, ?, ?, ?)",
-        args: [norm(s.value), s.lat, s.lng, s.detail],
+        args: [norm(s.value), s.lat, s.lng, s.address],
       })),
       "write"
     );

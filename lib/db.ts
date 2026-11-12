@@ -269,9 +269,9 @@ async function migrate(client: Client): Promise<void> {
   // runs 12 AM → midnight, so anything past the end of the day ends at 24.
   await client.batch(
     [
-      "UPDATE trip_events SET start_hour = 23.5 WHERE start_hour > 23.5",
+      "UPDATE trip_events SET start_hour = 23.75 WHERE start_hour > 23.75",
       "UPDATE trip_events SET end_hour = 24 WHERE end_hour > 24",
-      "UPDATE trip_events SET end_hour = start_hour + 0.5 WHERE end_hour <= start_hour",
+      "UPDATE trip_events SET end_hour = start_hour + 0.25 WHERE end_hour <= start_hour",
     ],
     "write"
   );
